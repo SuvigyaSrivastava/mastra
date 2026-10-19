@@ -441,6 +441,64 @@ describe('caller-driven experiments integrate with comparison', () => {
     expect(comparison.scorers['accuracy']).toBeDefined();
     expect(comparison.scorers['accuracy']!.delta).toBeCloseTo(0.1);
   });
+
+  it('averages repeated trials of the same item instead of keeping only one attempt', async () => {
+    // One item, run twice (attempt 0 and attempt 1) on each side. Each side's
+    // true mean is 0.5 (an even split between a failing and a passing trial),
+    // so a correct comparison reports both sides at 0.5 and a zero delta.
+    // Today, compareExperiments groups scores by (scorerId, itemId) only, so
+    // whichever attempt's row is read last silently overwrites the other and
+    // the comparison reports whatever that one attempt scored instead of the
+    // item's actual average across its trials.
+    const { ds, mastra, itemIds } = await setup([THREE_ITEMS[0]!]);
+    const itemId = itemIds[0]!;
+
+    const runA = await ds.createExperiment({ name: 'baseline' });
+    const runB = await ds.createExperiment({ name: 'candidate' });
+
+    await ds.submitExperimentResult({
+      experimentId: runA.experimentId,
+      itemId,
+      attempt: 0,
+      output: 'A:trial-0',
+      scores: [{ scorerId: 'accuracy', score: 0 }],
+    });
+    await ds.submitExperimentResult({
+      experimentId: runA.experimentId,
+      itemId,
+      attempt: 1,
+      output: 'A:trial-1',
+      scores: [{ scorerId: 'accuracy', score: 1 }],
+    });
+
+    await ds.submitExperimentResult({
+      experimentId: runB.experimentId,
+      itemId,
+      attempt: 0,
+      output: 'B:trial-0',
+      scores: [{ scorerId: 'accuracy', score: 1 }],
+    });
+    await ds.submitExperimentResult({
+      experimentId: runB.experimentId,
+      itemId,
+      attempt: 1,
+      output: 'B:trial-1',
+      scores: [{ scorerId: 'accuracy', score: 0 }],
+    });
+
+    await ds.finalizeExperiment({ experimentId: runA.experimentId });
+    await ds.finalizeExperiment({ experimentId: runB.experimentId });
+
+    const comparison = await compareExperiments(mastra, {
+      experimentIdA: runA.experimentId,
+      experimentIdB: runB.experimentId,
+    });
+
+    expect(comparison.scorers['accuracy']!.statsA.avgScore).toBeCloseTo(0.5);
+    expect(comparison.scorers['accuracy']!.statsB.avgScore).toBeCloseTo(0.5);
+    expect(comparison.scorers['accuracy']!.delta).toBeCloseTo(0);
+    expect(comparison.scorers['accuracy']!.regressed).toBe(false);
+  });
 });
 
 describe('runExperimentItem (mode 2: caller drives loop, Mastra runs items)', () => {
