@@ -126,7 +126,8 @@ export async function compareExperiments(mastra: Mastra, config: CompareExperime
     warnings.push('No overlapping items between experiments.');
   }
 
-  // 8. Group scores by scorer and item
+  // 8. Group scores by scorer and item, averaging across repeated trial
+  // attempts of the same item so one item contributes one effective score.
   const scoresMapA = groupScoresByScorerAndItem(scoresA.scores);
   const scoresMapB = groupScoresByScorerAndItem(scoresB.scores);
 
@@ -216,22 +217,64 @@ export async function compareExperiments(mastra: Mastra, config: CompareExperime
 }
 
 /**
- * Group scores by scorer ID, then by item ID.
+ * Group scores by scorer ID, then by item ID, averaging across repeated
+ * trial attempts of the same item into one effective score row.
+ *
+ * Score rows carry no attempt number (`ScoreRowData` has no `attempt`
+ * field), only `entityId` (the item ID). With repeated trials, an item can
+ * have several score rows — one per attempt — that all share the same
+ * `entityId`. Keying the result purely on `(scorerId, entityId)` and
+ * assigning the latest row read would silently drop every attempt but one,
+ * so instead every row for the same `(scorerId, entityId)` is collected and
+ * averaged into a single synthetic row before being returned. Null/missing
+ * scores (errored attempts) are excluded from the average, matching how
+ * `computeScorerStats` already treats them as errors rather than zeros; an
+ * item whose every attempt errored is reported as a single errored row.
  */
 function groupScoresByScorerAndItem(scores: ScoreRowData[]): Record<string, Record<string, ScoreRowData>> {
-  const result: Record<string, Record<string, ScoreRowData>> = {};
+  const grouped: Record<string, Record<string, ScoreRowData[]>> = {};
 
   for (const score of scores) {
     const scorerId = score.scorerId;
     const itemId = score.entityId; // entityId is the item ID for experiment scores
 
-    if (!result[scorerId]) {
-      result[scorerId] = {};
+    grouped[scorerId] ??= {};
+    grouped[scorerId]![itemId] ??= [];
+    grouped[scorerId]![itemId]!.push(score);
+  }
+
+  const result: Record<string, Record<string, ScoreRowData>> = {};
+  for (const [scorerId, byItem] of Object.entries(grouped)) {
+    result[scorerId] = {};
+    for (const [itemId, rows] of Object.entries(byItem)) {
+      result[scorerId]![itemId] = averageAttempts(rows);
     }
-    result[scorerId][itemId] = score;
   }
 
   return result;
+}
+
+/**
+ * Collapse one item's attempt rows into a single row whose `score` is the
+ * mean of the non-null attempt scores. The first row is used as the base
+ * (for fields like `reason`/`metadata` that don't make sense to average),
+ * with `score` overwritten by the computed mean. If every attempt has a
+ * null/undefined score, the result keeps a null score so the row still
+ * counts as an error rather than a silent zero.
+ */
+function averageAttempts(rows: ScoreRowData[]): ScoreRowData {
+  if (rows.length === 1) {
+    return rows[0]!;
+  }
+
+  const validScores = rows.map(row => row.score).filter((score): score is number => score != null);
+
+  const averagedScore = validScores.length > 0 ? validScores.reduce((sum, s) => sum + s, 0) / validScores.length : null;
+
+  return {
+    ...rows[0]!,
+    score: averagedScore as number, // ScoreRowData.score is typed non-null; see note above re: errored attempts.
+  };
 }
 
 /**
